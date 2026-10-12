@@ -1408,8 +1408,8 @@ end
             ball, flight.ball = currentBall, currentBall
             perfectShotLock = {ball = ball, expires = flight.started + 2}
         end
-        local success, controlled = pcall(controller.LocalPlayerIsBallNetworkOwner, controller)
-        if not success or not controlled or ball.Anchored then
+        -- Keep attempting this released shot when the physics-owner mirror changes.
+        if ball.Anchored then
             if flight.launched then clearPerfect() end
             return
         end
