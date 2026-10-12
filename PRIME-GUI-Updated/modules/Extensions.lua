@@ -1,4 +1,5 @@
 return {Exports={},Init=function()
+if not GuiParent or not Tabs then return end
 -- ============================================================================
 -- COURTSIDE / BZ merge — ported below from "BasketballZero SCRIPT.lua".
 -- Controls are mounted in the ESP / Zone / Movement / Misc / Visuals
