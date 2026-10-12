@@ -1345,6 +1345,7 @@ end
         perfectShotLock = nil
     end
     -- BEGIN PERFECT SHOT BALLISTICS
+    local PERFECT_SHOT_POWER_MULTIPLIER = 1.5
     local function shotVelocity(origin, target, gravity)
         if type(gravity) ~= "number" or gravity <= 0 then return nil end
         local delta = target - origin
@@ -1352,9 +1353,17 @@ end
         local height = math.max(8, math.min(45, distance * 0.12))
         local apex = math.max(origin.Y, target.Y) + height
         local vertical = math.sqrt(2 * gravity * (apex - origin.Y))
-        local seconds = (vertical + math.sqrt(2 * gravity * (apex - target.Y))) / gravity
+        local baseSeconds = (vertical + math.sqrt(2 * gravity * (apex - target.Y))) / gravity
+        -- Shot Power Modifier for this shot only: increase horizontal speed,
+        -- then solve the vertical launch again for the shorter travel time.
+        -- Keep at least four studs above the hoop for a descending entry.
+        local minimumApex = math.max(origin.Y, target.Y) + 4
+        local minimumSeconds = (math.sqrt(2 * gravity * (minimumApex - origin.Y))
+            + math.sqrt(2 * gravity * (minimumApex - target.Y))) / gravity
+        local seconds = math.max(baseSeconds / PERFECT_SHOT_POWER_MULTIPLIER, minimumSeconds)
         if seconds <= 0 or seconds ~= seconds or seconds == math.huge then return nil end
-        return Vector3.new(delta.X / seconds, vertical, delta.Z / seconds), seconds
+        local launchY = delta.Y / seconds + gravity * seconds * 0.5
+        return Vector3.new(delta.X / seconds, launchY, delta.Z / seconds), seconds
     end
     -- END PERFECT SHOT BALLISTICS
     local function armPerfect()
