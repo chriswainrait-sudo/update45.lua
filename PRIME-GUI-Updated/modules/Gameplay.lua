@@ -1343,6 +1343,22 @@ end
         end
         if hasBall() then resetDribbleCounters(infinitePatch) end
     end
+    local latencyRtt, latencyJitter, latencyDelivery = 0, 0, 0
+    local lastLatencyPoll, latencyKnown = -math.huge, false
+    local function samplePerfectLatency(now)
+        if now - lastLatencyPoll < 1 then return end
+        lastLatencyPoll = now
+        -- Native LocalPlayer API, seconds of round-trip latency. No probe remotes.
+        local ok, value = pcall(function() return LocalPlayer:GetNetworkPing() end)
+        if not ok or type(value) ~= "number" or value ~= value or value < 0 or value == math.huge then return end
+        value = math.min(value, 3)
+        if not latencyKnown then latencyRtt, latencyKnown = value, true; return end
+        latencyJitter = latencyJitter * 0.8 + math.abs(value - latencyRtt) * 0.2
+        latencyRtt = latencyRtt * 0.8 + value * 0.2
+    end
+    local function perfectWaitBudget()
+        return math.min(8, 2 + math.max(latencyRtt, latencyDelivery) * 2 + latencyJitter * 4)
+    end
     local function clearPerfect()
         perfectFlight = nil
         perfectShotLock = nil
@@ -1365,9 +1381,11 @@ end
         local ball = GetCurrentBall()
         local hoop = targetHoop()
         if not ball or not hoop or not playing() or not hasBall() then return end
+        local now = os.clock()
+        samplePerfectLatency(now)
         perfectFlight = {ball = ball, hoop = hoop, character = LocalPlayer.Character,
-            started = os.clock(), confirmed = false}
-        perfectShotLock = {ball = ball, expires = os.clock() + 2}
+            started = now, deadline = now + perfectWaitBudget(), confirmed = false}
+        perfectShotLock = {ball = ball, expires = perfectFlight.deadline}
     end
     local function updatePerfect(dt)
         local flight = perfectFlight
@@ -1375,26 +1393,45 @@ end
         local ball, controller = flight.ball, controllers.BallController
         local character, _, humanoid = localParts()
         local now = os.clock()
+        samplePerfectLatency(now)
+        if not flight.launched then
+            flight.deadline = math.max(flight.deadline, flight.started + perfectWaitBudget())
+            if perfectShotLock then perfectShotLock.expires = flight.deadline end
+            if now > flight.deadline then clearPerfect(); return end
+        end
         if not alive or not config.PerfectShot or not playing() or character ~= flight.character
             or not humanoid or humanoid.Health <= 0 or GetCurrentBall() ~= ball or not ball.Parent
             or not flight.hoop.Parent or targetHoop() ~= flight.hoop or not controller then clearPerfect(); return end
         if not flight.confirmed then
-            if now - flight.started > 2 then clearPerfect() end
             return
         end
         local ok, owner = pcall(controller.GetPlayerPossessingBall, controller)
         if not ok or (owner and owner ~= LocalPlayer) then clearPerfect(); return end
         if owner == LocalPlayer then
-            if flight.launched or now - flight.started > 2 then clearPerfect() end
+            if flight.launched or now > flight.deadline then clearPerfect() end
             return
         end
         local success, controlled = pcall(controller.LocalPlayerIsBallNetworkOwner, controller)
-        if not success or not controlled or ball.Anchored then clearPerfect(); return end
+        if not success or not controlled or ball.Anchored then
+            if flight.launched then
+                flight.pausedAt = flight.pausedAt or now
+                local grace = math.min(0.8, math.max(0.05, latencyRtt + latencyJitter * 4))
+                if now - flight.pausedAt > grace then clearPerfect() end
+            end
+            return
+        end
+        if flight.pausedAt then
+            -- Resume from the actual ball position, never advance it by ping.
+            flight.pausedAt, flight.launched = nil, nil
+            flight.deadline = now + perfectWaitBudget()
+        end
         if not flight.launched then
+            if flight.firstLaunch and now - flight.firstLaunch > 8 then clearPerfect(); return end
             local velocity, duration = shotVelocity(ball.Position, flight.hoop.Position, Workspace.Gravity)
             if not velocity then clearPerfect(); return end
             flight.origin, flight.velocity, flight.duration = ball.Position, velocity, duration
             flight.gravity, flight.launched = Workspace.Gravity, now
+            flight.firstLaunch = flight.firstLaunch or now
             perfectShotLock = {ball = ball, expires = now + duration + 0.15}
             ball.AssemblyLinearVelocity = velocity
             return
@@ -1406,7 +1443,8 @@ end
         local gravity = Vector3.new(0, -flight.gravity, 0)
         local expected = flight.origin + flight.velocity * elapsed + gravity * (elapsed * elapsed * 0.5)
         local error = expected - ball.Position
-        if error.Magnitude > 25 then clearPerfect(); return end
+        local positionTolerance = 25 + math.min(25, flight.velocity.Magnitude * (latencyRtt * 0.5 + latencyJitter))
+        if error.Magnitude > positionTolerance then clearPerfect(); return end
         local correction = error * 8
         if correction.Magnitude > 35 then correction = correction.Unit * 35 end
         ball.AssemblyLinearVelocity = flight.velocity + gravity * elapsed + correction
@@ -1436,7 +1474,15 @@ end
         if type(signal.Connect) == "function" then
             patch.received = signal:Connect(function(destination)
                 if throwPatch == patch and perfectFlight and typeof(destination) == "Vector3" then
-                    perfectFlight.confirmed = true
+                    local flight = perfectFlight
+                    if not flight.confirmed then
+                        local now = os.clock()
+                        local delivered = math.min(3, math.max(0, now - flight.started))
+                        latencyDelivery = latencyDelivery == 0 and delivered or latencyDelivery * 0.8 + delivered * 0.2
+                        flight.deadline = math.min(flight.started + 8,
+                            math.max(flight.deadline, now + math.max(0.25, latencyRtt + latencyJitter * 4)))
+                        flight.confirmed = true
+                    end
                 end
             end)
         end
