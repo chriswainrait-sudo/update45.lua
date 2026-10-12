@@ -15,22 +15,31 @@ LocalPlayer = Players.LocalPlayer
 PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
 function GetGuiParent()
+    local function writable(parent)
+        if typeof(parent) ~= "Instance" then return false end
+        if parent == PlayerGui or parent:IsDescendantOf(PlayerGui) then return false end
+        local probe = Instance.new("ScreenGui")
+        local ok = pcall(function() probe.Parent = parent end)
+        pcall(function() probe:Destroy() end)
+        return ok
+    end
     local ok, hui = pcall(function()
-        return gethui()
+        return type(gethui) == "function" and gethui() or nil
     end)
-    if ok and typeof(hui) == "Instance" then
+    if ok and writable(hui) then
         return hui
     end
     local okCore, coreGui = pcall(function()
         return game:GetService("CoreGui")
     end)
-    if okCore and coreGui then
+    if okCore and writable(coreGui) then
         return coreGui
     end
-    return PlayerGui
+    return nil
 end
 
 GuiParent = GetGuiParent()
+if not GuiParent then return end
 
 function IsMobileDevice()
     local success, platform = pcall(function()
@@ -414,7 +423,7 @@ function ConnectClick(button, callback)
         if isClickInput(input) and pressed then
             pressed = false
             if callback then
-                callback()
+                pcall(callback)
             end
         end
     end)
@@ -1615,7 +1624,14 @@ function NexusUI:CreateWindow(options)
                 refresh(true)
 
                 if data and data.Callback then
-                    data.Callback(enabled)
+                    local ok = pcall(data.Callback, enabled)
+                    if not ok then
+                        enabled = not newValue
+                        self.Value = enabled
+                        pcall(data.Callback, enabled)
+                        refresh(false)
+                        return false
+                    end
                 end
                 return true
             end
@@ -1784,7 +1800,7 @@ function NexusUI:CreateWindow(options)
                 NexusUI.Options[id] = sliderOption
                 NexusUI.Options[id .. "Value"] = value
                 if data and data.Callback then
-                    data.Callback(value)
+                    pcall(data.Callback, value)
                 end
             end
 
@@ -2017,7 +2033,7 @@ function NexusUI:CreateWindow(options)
                 refreshSelection(value)
                 updateOpenState(false)
                 if invokeCallback ~= false and data and data.Callback then
-                    data.Callback(value)
+                    pcall(data.Callback, value)
                 end
                 return true
             end
@@ -2229,7 +2245,7 @@ function NexusUI:CreateWindow(options)
                     end
                 end)
                 if data and data.Callback then
-                    data.Callback()
+                    pcall(data.Callback)
                 end
             end)
 
