@@ -1,4 +1,5 @@
-return {Exports={"MiscSection","CosmeticsSection","ballEspEnabled","ballEspHighlights","ballEspAddedConnection","ballEspRemovingConnection","isBallMeshPart","findBallFromDescendant","removeBallHighlight","addBallHighlight","clearBallEsp","setBallEspEnabled","MovementSection","Visual","TimeChangerThread","suicide","rejoinGame","serverHop","activeEmoteTrack","emoteAnimationsByName","stopSelectedEmote","collectEmoteAnimations","playSelectedEmote","emoteDropdown","emoteFolder","bindEmoteFolder","_emotesAssets","initialEmoteFolder"},Init=function()
+return {Exports={"MiscSection","CosmeticsSection","ballEspEnabled","ballEspHighlights","ballEspAddedConnection","ballEspRemovingConnection","isBallMeshPart","findBallFromDescendant","removeBallHighlight","addBallHighlight","clearBallEsp","setBallEspEnabled","MovementSection","Visual","TimeChangerThread","suicide","activeEmoteTrack","emoteAnimationsByName","stopSelectedEmote","collectEmoteAnimations","playSelectedEmote","emoteDropdown","emoteFolder","bindEmoteFolder","_emotesAssets","initialEmoteFolder"},Init=function()
+if not GuiParent or not Tabs then return end
 MiscSection = Tabs.Misc:AddSection("Misc")
 CosmeticsSection = Tabs.Misc:AddSection("Cosmetics")
 
@@ -528,54 +529,6 @@ function suicide()
     end
 end
 
-function rejoinGame()
-    local ts = game:GetService("TeleportService")
-    local placeId = game.PlaceId
-    local jobId = game.JobId
-    _G.__NEXUS_TELEPORT_ALLOWED = true
-    ts:TeleportToPlaceInstance(placeId, jobId, game:GetService("Players").LocalPlayer)
-    task.delay(5, function() _G.__NEXUS_TELEPORT_ALLOWED = false end)
-    NexusUI:Notify({
-        Title = "Rejoin",
-        Content = "Rejoining game...",
-        Duration = 3
-    })
-end
-
-function serverHop()
-    local ts = game:GetService("TeleportService")
-    local http = game:GetService("HttpService")
-    
-    NexusUI:Notify({
-        Title = "Server Hop",
-        Content = "Finding new server...",
-        Duration = 3
-    })
-    
-    local servers = {}
-    local req = http:GetAsync("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?limit=100")
-    local data = http:JSONDecode(req)
-    
-    for _, server in ipairs(data.data) do
-        if server.playing < server.maxPlayers and server.id ~= game.JobId then
-            table.insert(servers, server.id)
-        end
-    end
-    
-    if #servers > 0 then
-        local randomServer = servers[math.random(1, #servers)]
-        _G.__NEXUS_TELEPORT_ALLOWED = true
-        ts:TeleportToPlaceInstance(game.PlaceId, randomServer)
-        task.delay(5, function() _G.__NEXUS_TELEPORT_ALLOWED = false end)
-    else
-        NexusUI:Notify({
-            Title = "Server Hop Error",
-            Content = "No available servers found!",
-            Duration = 3
-        })
-    end
-end
-
 Window:SelectTab(1)
 
 Tabs.Other:AddSection("Other")
@@ -734,20 +687,6 @@ Tabs.Other:AddButton({
     end
 })
 
-Tabs.Other:AddButton({
-    Title = "Rejoin Game",
-    Description = "Rejoins the current game server",
-    Callback = function()
-        rejoinGame()
-    end
-})
 
-Tabs.Other:AddButton({
-    Title = "Server Hop",
-    Description = "Joins a new random server",
-    Callback = function()
-        serverHop()
-    end
-})
 
 end}
