@@ -1,4 +1,5 @@
 return {Exports={"Options","NoCooldownEnabled","NoCooldownConnection","NoStunEnabled","NoStunConnection","NoRagdollEnabled","NoRagdollConnection","AutoBlockEnabled","AutoBlockConnection","AutoPassEnabled","AutoPassConnection","AutoBlockDunkEnabled","AutoBlockDunkConnection","SpeedBoostEnabled","SpeedBoostConnection","SpeedBoostValue","JumpBoostEnabled","JumpBoostConnection","JumpBoostValue","ShotPowerEnabled","ShotPowerConnection","ShotPowerMultiplier","InfinitePumpFakesEnabled","InfinitePumpFakesThread","BallController","OriginalGetMaxPumpFakes","FOVEnabled","FOVConnection","FOVValue","AntiSlipEnabled","AntiSlipConnection","OriginalCameraMaxZoomDistance","OriginalFieldOfView","MainSection","GetCurrentBall","NoCooldownControllerInstance","FindNoCooldownController","executorName","noCooldownUnsupportedExecutor","noCooldownInputBlocker","setNoCooldownInputBlocked","lockNoAbilityCooldown","CosmeticAssets","ActiveCosmeticContainer","ActiveCosmeticTrove","SelectedCosmeticName","CosmeticWeld","SetCosmeticVfxEnabled","NewCosmeticTrove","setupRankedBadge","setupMascot","attachPartsByName","attachHandleToHead","CosmeticHandlers","CollectCosmeticNames","DestroyActiveCosmetic","AttachFallbackCosmetic","EquipCosmetic","cosmeticDropdown","cosmeticRefreshQueued","QueueCosmeticRefresh"},Init=function()
+if not GuiParent or not Tabs then return end
 Options = NexusUI.Options
 
 NoCooldownEnabled = false
@@ -41,7 +42,8 @@ local function activateGuiButton(button, signalOnly)
     end
     local activated = false
     if type(getconnections) == "function" then
-        for _, connection in ipairs(getconnections(button.MouseButton1Click)) do
+        local success, connections = pcall(getconnections, button.MouseButton1Click)
+        for _, connection in ipairs(success and type(connections) == "table" and connections or {}) do
             if type(connection.Function) == "function" then
                 local ok = pcall(connection.Function)
                 activated = activated or ok
@@ -519,6 +521,7 @@ NoCooldownControllerInstance = nil
 
 function FindNoCooldownController()
     if NoCooldownControllerInstance then return NoCooldownControllerInstance end
+    if type(getgc) ~= "function" then return nil end
     pcall(function()
         for _, obj in pairs(getgc(true)) do
             if type(obj) == "table" then
@@ -1107,7 +1110,7 @@ end
         SilentAimShot = false, AutoDunk = false, PerfectShot = false}
     local controllers, connections, roundConnections = {}, {}, {}
     local alive = false
-    local heartbeat, perfectPhysics, discoveryTask, dangerGui, dangerLabel
+    local heartbeat, discoveryTask, dangerGui, dangerLabel
     local infinitePatch, throwPatch
     local perfectFlight
     local lastScan, lastThreatCheck, lastDribble = 0, 0, -math.huge
@@ -1340,19 +1343,9 @@ end
         end
         if hasBall() then resetDribbleCounters(infinitePatch) end
     end
-    local perfectStatus
-    local function setPerfectStatus(status)
-        if perfectStatus == status then return end
-        perfectStatus = status
-        local option = NexusUI.Toggles and NexusUI.Toggles.PerfectShot
-        if option and type(option.SetDescription) == "function" then
-            option:SetDescription("Hold the ball for about 5 seconds before shooting for this feature to work.\nStatus: " .. status)
-        end
-    end
-    local function clearPerfect(reason)
+    local function clearPerfect()
         perfectFlight = nil
         perfectShotLock = nil
-        if reason then setPerfectStatus(reason) end
     end
     -- BEGIN PERFECT SHOT BALLISTICS
     local function shotVelocity(origin, target, gravity)
@@ -1371,14 +1364,10 @@ end
         clearPerfect()
         local ball = GetCurrentBall()
         local hoop = targetHoop()
-        if not ball then setPerfectStatus("Ball not found"); return end
-        if not hoop then setPerfectStatus("Scoring hoop not found"); return end
-        if not playing() then setPerfectStatus("Waiting for an active round"); return end
-        if not (hasBall() or values().HasBall == true) then setPerfectStatus("Ball possession not confirmed"); return end
+        if not ball or not hoop or not playing() or not hasBall() then return end
         perfectFlight = {ball = ball, hoop = hoop, character = LocalPlayer.Character,
             started = os.clock(), confirmed = false}
         perfectShotLock = {ball = ball, expires = os.clock() + 2}
-        setPerfectStatus("Waiting for shot confirmation")
     end
     local function updatePerfect(dt)
         local flight = perfectFlight
@@ -1388,52 +1377,40 @@ end
         local now = os.clock()
         if not alive or not config.PerfectShot or not playing() or character ~= flight.character
             or not humanoid or humanoid.Health <= 0 or GetCurrentBall() ~= ball or not ball.Parent
-            or not flight.hoop.Parent or targetHoop() ~= flight.hoop or not controller then clearPerfect("Shot context changed"); return end
+            or not flight.hoop.Parent or targetHoop() ~= flight.hoop or not controller then clearPerfect(); return end
         if not flight.confirmed then
-            if now - flight.started > 2 then clearPerfect("Shot confirmation timed out") end
+            if now - flight.started > 2 then clearPerfect() end
             return
         end
         local ok, owner = pcall(controller.GetPlayerPossessingBall, controller)
-        if not ok then clearPerfect("Ball possession check failed"); return end
-        if owner and owner ~= LocalPlayer then clearPerfect("Ball picked up by another player"); return end
-        local held = values().HasBall
-        if owner == LocalPlayer and held ~= false then
-            if flight.launched then clearPerfect("Ball picked up")
-            elseif now - flight.started > 2 then clearPerfect("Ball release timed out")
-            else setPerfectStatus("Waiting for ball release") end
+        if not ok or (owner and owner ~= LocalPlayer) then clearPerfect(); return end
+        if owner == LocalPlayer then
+            if flight.launched or now - flight.started > 2 then clearPerfect() end
             return
         end
-        if ball.Anchored then
-            if now - flight.started > 2 then clearPerfect("Ball is anchored") end
-            return
-        end
+        local success, controlled = pcall(controller.LocalPlayerIsBallNetworkOwner, controller)
+        if not success or not controlled or ball.Anchored then clearPerfect(); return end
         if not flight.launched then
             local velocity, duration = shotVelocity(ball.Position, flight.hoop.Position, Workspace.Gravity)
-            if not velocity then clearPerfect("Invalid trajectory calculation"); return end
+            if not velocity then clearPerfect(); return end
             flight.origin, flight.velocity, flight.duration = ball.Position, velocity, duration
             flight.gravity, flight.launched = Workspace.Gravity, now
             perfectShotLock = {ball = ball, expires = now + duration + 0.15}
             ball.AssemblyLinearVelocity = velocity
-            setPerfectStatus("Correcting your shot")
             return
         end
         local elapsed = now - flight.launched
-        if elapsed > flight.duration + 0.1 then clearPerfect("Shot correction finished"); return end
-        if Workspace.Gravity ~= flight.gravity then clearPerfect("Gravity changed"); return end
+        if elapsed > flight.duration + 0.1 or Workspace.Gravity ~= flight.gravity then clearPerfect(); return end
         -- Follow the calculated descending arc; compensate for local drag and
         -- small integration errors instead of multiplying speed every 0.5s.
         local gravity = Vector3.new(0, -flight.gravity, 0)
         local expected = flight.origin + flight.velocity * elapsed + gravity * (elapsed * elapsed * 0.5)
         local error = expected - ball.Position
+        if error.Magnitude > 25 then clearPerfect(); return end
         local correction = error * 8
-        local maxCorrection = math.max(35, flight.velocity.Magnitude)
-        if correction.Magnitude > maxCorrection then correction = correction.Unit * maxCorrection end
+        if correction.Magnitude > 35 then correction = correction.Unit * 35 end
         ball.AssemblyLinearVelocity = flight.velocity + gravity * elapsed + correction
             - gravity * (math.min(dt or 1 / 60, 0.05) * 0.5)
-    end
-    local function updatePerfectSafely(dt)
-        local ok, err = pcall(updatePerfect, dt)
-        if not ok then clearPerfect("Correction error: " .. tostring(err):sub(1, 200)) end
     end
     local function removeSilentAim()
         local patch = throwPatch
@@ -1448,11 +1425,7 @@ end
         local ability = controllers.AbilityController
         local service = ability and ability.BallService
         local signal = service and service.Throw
-        if not (config.SilentAimShot or config.PerfectShot) or not mutable(signal) then
-            removeSilentAim()
-            if config.PerfectShot then setPerfectStatus("Waiting for game shot handler") end
-            return
-        end
+        if not (config.SilentAimShot or config.PerfectShot) or not mutable(signal) then removeSilentAim() return end
         if throwPatch and throwPatch.object == signal
             and rawget(signal, "Fire") == throwPatch.wrapper
             and (not throwPatch.received or throwPatch.received.Connected ~= false) then return end
@@ -1488,7 +1461,6 @@ end
         end
         rawset(signal, "Fire", patch.wrapper)
         throwPatch = patch
-        if config.PerfectShot then setPerfectStatus("Ready for your shot") end
     end
     local function discoverControllers()
         if discoveryTask or not alive then return end
@@ -1604,7 +1576,6 @@ end
         actionEpoch = actionEpoch + 1
         actionBusy = false
         if heartbeat then heartbeat:Disconnect() heartbeat = nil end
-        if perfectPhysics then perfectPhysics:Disconnect() perfectPhysics = nil end
         if discoveryTask then pcall(task.cancel, discoveryTask) discoveryTask = nil end
         disconnectAll(connections)
         disconnectAll(roundConnections)
@@ -1627,12 +1598,6 @@ end
         connect(connections, LocalPlayer:GetPropertyChangedSignal("Team"), resetRound)
         lastScan = os.clock()
         discoverControllers()
-        if RunService.PreSimulation then
-            perfectPhysics = RunService.PreSimulation:Connect(function(dt)
-                if ScriptUnloaded then stop() return end
-                updatePerfectSafely(dt)
-            end)
-        end
         heartbeat = RunService.Heartbeat:Connect(function(dt)
             if ScriptUnloaded then stop() return end
             local now = os.clock()
@@ -1643,7 +1608,7 @@ end
             end
             updateSilentAim()
             updateInfinite()
-            updatePerfectSafely(dt)
+            updatePerfect(dt)
             if now - lastThreatCheck < 0.04 then return end
             lastThreatCheck = now
             local character, root, humanoid = localParts()
@@ -1674,9 +1639,6 @@ end
             if otherToggle then otherToggle:SetValue(false) end
         end
         if key == "AutoDunk" then setAutoDunk(config.AutoDunk) end
-        if key == "PerfectShot" then
-            setPerfectStatus(config.PerfectShot and "Ready for your shot" or "Disabled")
-        end
         if not config.PerfectShot then clearPerfect() end
         if anyEnabled() then
             start()
