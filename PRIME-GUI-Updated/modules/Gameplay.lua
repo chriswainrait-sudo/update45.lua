@@ -1107,7 +1107,7 @@ end
         SilentAimShot = false, AutoDunk = false, PerfectShot = false}
     local controllers, connections, roundConnections = {}, {}, {}
     local alive = false
-    local heartbeat, discoveryTask, dangerGui, dangerLabel
+    local heartbeat, perfectPhysics, discoveryTask, dangerGui, dangerLabel
     local infinitePatch, throwPatch
     local perfectFlight
     local lastScan, lastThreatCheck, lastDribble = 0, 0, -math.huge
@@ -1424,16 +1424,24 @@ end
         end
         local elapsed = now - flight.launched
         if elapsed > flight.duration + 0.1 or Workspace.Gravity ~= flight.gravity then clearPerfect(); return end
-        -- Follow the calculated descending arc; compensate for local drag and
-        -- small integration errors instead of multiplying speed every 0.5s.
+        -- Solve from the actual replicated position for the remaining flight
+        -- time; a network correction must not leave us chasing a stale origin.
         local gravity = Vector3.new(0, -flight.gravity, 0)
-        local expected = flight.origin + flight.velocity * elapsed + gravity * (elapsed * elapsed * 0.5)
-        local error = expected - ball.Position
-        if error.Magnitude > 25 then clearPerfect(); return end
-        local correction = error * 8
-        if correction.Magnitude > 35 then correction = correction.Unit * 35 end
-        ball.AssemblyLinearVelocity = flight.velocity + gravity * elapsed + correction
-            - gravity * (math.min(dt or 1 / 60, 0.05) * 0.5)
+        local remaining = flight.duration - elapsed
+        if remaining <= 0 then clearPerfect(); return end
+        local velocity = (flight.hoop.Position - ball.Position) / remaining - gravity * (remaining * 0.5)
+        -- Near the deadline, a large correction needs a fresh arc rather than
+        -- unbounded velocity. Only replan this owned shot once.
+        if velocity.Magnitude > math.max(120, flight.velocity.Magnitude * 2) then
+            if flight.replanned then clearPerfect(); return end
+            local nextVelocity, duration = shotVelocity(ball.Position, flight.hoop.Position, flight.gravity)
+            if not nextVelocity then clearPerfect(); return end
+            flight.velocity, flight.duration, flight.launched = nextVelocity, duration, now
+            flight.replanned = true
+            perfectShotLock = {ball = ball, expires = now + duration + 0.15}
+            velocity = nextVelocity
+        end
+        ball.AssemblyLinearVelocity = velocity - gravity * (math.min(dt or 1 / 60, 0.05) * 0.5)
     end
     local function removeSilentAim()
         local patch = throwPatch
@@ -1606,6 +1614,7 @@ end
         actionEpoch = actionEpoch + 1
         actionBusy = false
         if heartbeat then heartbeat:Disconnect() heartbeat = nil end
+        if perfectPhysics then perfectPhysics:Disconnect() perfectPhysics = nil end
         if discoveryTask then pcall(task.cancel, discoveryTask) discoveryTask = nil end
         disconnectAll(connections)
         disconnectAll(roundConnections)
@@ -1628,6 +1637,12 @@ end
         connect(connections, LocalPlayer:GetPropertyChangedSignal("Team"), resetRound)
         lastScan = os.clock()
         discoverControllers()
+        if RunService.PreSimulation then
+            perfectPhysics = RunService.PreSimulation:Connect(function(dt)
+                if ScriptUnloaded then stop() return end
+                updatePerfect(dt)
+            end)
+        end
         heartbeat = RunService.Heartbeat:Connect(function(dt)
             if ScriptUnloaded then stop() return end
             local now = os.clock()
@@ -1638,7 +1653,7 @@ end
             end
             updateSilentAim()
             updateInfinite()
-            updatePerfect(dt)
+            if not perfectPhysics then updatePerfect(dt) end
             if now - lastThreatCheck < 0.04 then return end
             lastThreatCheck = now
             local character, root, humanoid = localParts()
