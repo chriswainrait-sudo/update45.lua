@@ -24,7 +24,12 @@ ShotPowerEnabled = false
 ShotPowerConnection = nil
 ShotPowerMultiplier = 1.5
 -- BEGIN SHARED SHOT POWER
-function ApplyShotPowerModifier(velocity, multiplier)
+function ApplyShotPowerModifier(velocity, multiplier, targetSpeed)
+    if type(targetSpeed) == "number" and targetSpeed == targetSpeed and targetSpeed > 0 and targetSpeed < math.huge then
+        local magnitude = velocity.Magnitude
+        if magnitude > 0.0001 then return velocity * (targetSpeed / magnitude) end
+        return velocity * 0
+    end
     local factor = multiplier or ShotPowerMultiplier or 1.5
     if type(factor) ~= "number" or factor ~= factor or math.abs(factor) == math.huge then factor = 1.5 end
     factor = math.max(0.5, math.min(3, factor))
@@ -1117,6 +1122,7 @@ end
     local config = {StealDanger = false, InfiniteDribble = false, AutoDribble = false,
         SilentAimShot = false, AutoDunk = false, PerfectShot = false}
     local controllers, connections, roundConnections = {}, {}, {}
+    local cachedKnit, cachedKnitModule
     local alive = false
     local heartbeat, discoveryTask, dangerGui, dangerLabel
     local infinitePatch, throwPatch
@@ -1359,34 +1365,27 @@ end
         perfectShotLock = nil
     end
     -- BEGIN PERFECT SHOT BALLISTICS
-    local function shotVelocity(origin, target, gravity, characterDistance, powerMultiplier)
+    local function shotVelocity(origin, target, gravity, characterDistance)
         if type(gravity) ~= "number" or gravity <= 0 then return nil end
         local delta = target - origin
         local distance = Vector2.new(delta.X, delta.Z).Magnitude
         local range = characterDistance or distance
         if type(range) ~= "number" or range ~= range or range < 0 or range == math.huge then return nil end
-        local height = math.max(8, math.min(45, range * 0.12))
-        local apex = math.max(origin.Y, target.Y) + height
-        local vertical = math.sqrt(2 * gravity * (apex - origin.Y))
-        local baseSeconds = (vertical + math.sqrt(2 * gravity * (apex - target.Y))) / gravity
-        local baseVelocity = Vector3.new(delta.X / baseSeconds, vertical, delta.Z / baseSeconds)
-        local poweredVelocity = ApplyShotPowerModifier(baseVelocity, powerMultiplier)
-        local horizontalSpeed = Vector2.new(poweredVelocity.X, poweredVelocity.Z).Magnitude
-        local seconds = distance > 0.01 and horizontalSpeed > 0.01 and distance / horizontalSpeed or baseSeconds
-        -- Re-solve vertical speed after applying the power multiplier. Maintain
-        -- a descending entry instead of multiplying a solved arc a second time.
-        local clearance = math.max(4, math.min(14, range * 0.025))
+        -- Absolute horizontal speed follows range; it is independent of the
+        -- standalone Shot Power multiplier and of the game's previous velocity.
+        local horizontalSpeed = math.max(65, math.min(220, 65 + range * 0.5))
+        local seconds = distance / horizontalSpeed
+        local clearance = math.max(4, math.min(16, range * 0.04))
         local minimumApex = math.max(origin.Y, target.Y) + clearance
         local minimumSeconds = (math.sqrt(2 * gravity * (minimumApex - origin.Y))
             + math.sqrt(2 * gravity * (minimumApex - target.Y))) / gravity
         seconds = math.max(seconds, minimumSeconds)
-        if distance <= 0.01 then
-            local upSpeed = math.max(poweredVelocity.Y, math.sqrt(2 * gravity * (minimumApex - origin.Y)))
-            seconds = (upSpeed + math.sqrt(math.max(0, upSpeed * upSpeed - 2 * gravity * delta.Y))) / gravity
-        end
         if seconds <= 0 or seconds ~= seconds or seconds == math.huge then return nil end
         local launchY = delta.Y / seconds + gravity * seconds * 0.5
-        return Vector3.new(delta.X / seconds, launchY, delta.Z / seconds), seconds
+        local aim = Vector3.new(delta.X, launchY * seconds, delta.Z)
+        -- A minimum arc can lower horizontal speed on close shots.
+        local targetSpeed = math.sqrt((distance / seconds)^2 + launchY * launchY)
+        return ApplyShotPowerModifier(aim, nil, targetSpeed), seconds
     end
     -- END PERFECT SHOT BALLISTICS
     local function armPerfect()
@@ -1398,7 +1397,6 @@ end
         local _, root = localParts()
         perfectFlight = {ball = ball, hoop = hoop, character = LocalPlayer.Character,
             started = now, deadline = now + 2, confirmed = false,
-            powerMultiplier = ShotPowerMultiplier or 1.5,
             characterDistance = root and (hoop.Position - root.Position).Magnitude or nil}
         perfectShotLock = {ball = ball, expires = perfectFlight.deadline}
         -- Only this pending/released shot owns a physics callback. No idle
@@ -1451,7 +1449,7 @@ end
             if flight.firstLaunch and now - flight.firstLaunch > 8 then clearPerfect(); return end
             local _, root = localParts()
             local range = root and (flight.hoop.Position - root.Position).Magnitude or flight.characterDistance
-            local velocity, duration = shotVelocity(ball.Position, flight.hoop.Position, Workspace.Gravity, range, flight.powerMultiplier)
+            local velocity, duration = shotVelocity(ball.Position, flight.hoop.Position, Workspace.Gravity, range)
             if not velocity then clearPerfect(); return end
             flight.origin, flight.velocity, flight.duration = ball.Position, velocity, duration
             flight.gravity, flight.launched = Workspace.Gravity, now
@@ -1528,7 +1526,22 @@ end
         if discoveryTask or not alive then return end
         discoveryTask = task.defer(function()
             local found = {}
-            if type(getgc) == "function" then
+            local packages = ReplicatedStorage:FindFirstChild("Packages")
+            local knitModule = packages and packages:FindFirstChild("Knit")
+            if knitModule and (not cachedKnit or cachedKnitModule ~= knitModule) then
+                local ok, knit = pcall(require, knitModule)
+                if ok and type(knit) == "table" and type(knit.GetController) == "function" then
+                    cachedKnit, cachedKnitModule = knit, knitModule
+                end
+            end
+            if cachedKnit then
+                for _, name in ipairs({"BallController", "MovementController", "Network", "AbilityController"}) do
+                    local ok, object = pcall(cachedKnit.GetController, name)
+                    if ok and type(object) == "table" then found[name] = object end
+                end
+            end
+            if (not found.BallController or not found.MovementController or not found.Network or not found.AbilityController)
+                and type(getgc) == "function" then
                 local ok, objects = pcall(getgc, true)
                 if ok and type(objects) == "table" then
                     local visited = 0
@@ -1536,28 +1549,15 @@ end
                         if not alive then return end
                         if type(object) == "table" then
                             local name = rawget(object, "Name")
-                            if name == "BallController" and type(object.Dribble) == "function"
+                            if name == "BallController" and not found[name] and type(object.Dribble) == "function"
                                 and type(object.Dunk) == "function" and type(object.DribbleDB) == "number" then found[name] = object
-                            elseif name == "MovementController" and type(object.States) == "table" then found[name] = object
-                            elseif name == "Network" and type(object.CharValues) == "table" then found[name] = object
-                            elseif name == "AbilityController" and type(object.BallService) == "table" then found[name] = object end
-                            if type(rawget(object, "DunkDistBuffZones")) == "table"
-                                and type(rawget(object, "ZoneDribbles")) == "table" then found.Zones = object end
+                            elseif name == "MovementController" and not found[name] and type(object.States) == "table" then found[name] = object
+                            elseif name == "Network" and not found[name] and type(object.CharValues) == "table" then found[name] = object
+                            elseif name == "AbilityController" and not found[name] and type(object.BallService) == "table" then found[name] = object end
                         end
                         visited = visited + 1
-                        if visited % 2000 == 0 then task.wait() end
-                    end
-                end
-            else
-                -- GetController reads existing controllers without GetService's
-                -- initialization and remote-renaming side effects in this Place.
-                local packages = ReplicatedStorage:FindFirstChild("Packages")
-                local knitModule = packages and packages:FindFirstChild("Knit")
-                local ok, knit = pcall(function() return knitModule and require(knitModule) end)
-                if ok and type(knit) == "table" and type(knit.GetController) == "function" then
-                    for _, name in ipairs({"BallController", "MovementController", "Network", "AbilityController"}) do
-                        local success, controller = pcall(knit.GetController, name)
-                        if success then found[name] = controller end
+                        if found.BallController and found.MovementController and found.Network and found.AbilityController then break end
+                        if visited % 1000 == 0 then task.wait() end
                     end
                 end
             end
@@ -1666,7 +1666,7 @@ end
             if now - lastScan >= 2 then
                 lastScan = now
                 if not controllers.BallController or not controllers.MovementController or not controllers.Network
-                    or config.SilentAimShot or config.PerfectShot then discoverControllers() end
+                    or ((config.SilentAimShot or config.PerfectShot) and not controllers.AbilityController) then discoverControllers() end
             end
             updateSilentAim()
             updateInfinite()
