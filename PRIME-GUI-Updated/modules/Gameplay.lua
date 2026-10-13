@@ -1,4 +1,4 @@
-return {Exports={"Options","NoCooldownEnabled","NoCooldownConnection","NoStunEnabled","NoStunConnection","NoRagdollEnabled","NoRagdollConnection","AutoBlockEnabled","AutoBlockConnection","AutoPassEnabled","AutoPassConnection","AutoBlockDunkEnabled","AutoBlockDunkConnection","SpeedBoostEnabled","SpeedBoostConnection","SpeedBoostValue","JumpBoostEnabled","JumpBoostConnection","JumpBoostValue","ShotPowerEnabled","ShotPowerConnection","ShotPowerMultiplier","InfinitePumpFakesEnabled","InfinitePumpFakesThread","BallController","OriginalGetMaxPumpFakes","FOVEnabled","FOVConnection","FOVValue","AntiSlipEnabled","AntiSlipConnection","OriginalCameraMaxZoomDistance","OriginalFieldOfView","MainSection","GetCurrentBall","NoCooldownControllerInstance","FindNoCooldownController","executorName","noCooldownUnsupportedExecutor","noCooldownInputBlocker","setNoCooldownInputBlocked","lockNoAbilityCooldown","CosmeticAssets","ActiveCosmeticContainer","ActiveCosmeticTrove","SelectedCosmeticName","CosmeticWeld","SetCosmeticVfxEnabled","NewCosmeticTrove","setupRankedBadge","setupMascot","attachPartsByName","attachHandleToHead","CosmeticHandlers","CollectCosmeticNames","DestroyActiveCosmetic","AttachFallbackCosmetic","EquipCosmetic","cosmeticDropdown","cosmeticRefreshQueued","QueueCosmeticRefresh"},Init=function()
+return {Exports={"Options","NoCooldownEnabled","NoCooldownConnection","NoStunEnabled","NoStunConnection","NoRagdollEnabled","NoRagdollConnection","AutoBlockEnabled","AutoBlockConnection","AutoPassEnabled","AutoPassConnection","AutoBlockDunkEnabled","AutoBlockDunkConnection","SpeedBoostEnabled","SpeedBoostConnection","SpeedBoostValue","JumpBoostEnabled","JumpBoostConnection","JumpBoostValue","ShotPowerEnabled","ShotPowerConnection","ShotPowerMultiplier","ApplyShotPowerModifier","InfinitePumpFakesEnabled","InfinitePumpFakesThread","BallController","OriginalGetMaxPumpFakes","FOVEnabled","FOVConnection","FOVValue","AntiSlipEnabled","AntiSlipConnection","OriginalCameraMaxZoomDistance","OriginalFieldOfView","MainSection","GetCurrentBall","NoCooldownControllerInstance","FindNoCooldownController","executorName","noCooldownUnsupportedExecutor","noCooldownInputBlocker","setNoCooldownInputBlocked","lockNoAbilityCooldown","CosmeticAssets","ActiveCosmeticContainer","ActiveCosmeticTrove","SelectedCosmeticName","CosmeticWeld","SetCosmeticVfxEnabled","NewCosmeticTrove","setupRankedBadge","setupMascot","attachPartsByName","attachHandleToHead","CosmeticHandlers","CollectCosmeticNames","DestroyActiveCosmetic","AttachFallbackCosmetic","EquipCosmetic","cosmeticDropdown","cosmeticRefreshQueued","QueueCosmeticRefresh"},Init=function()
 if not GuiParent or not Tabs then return end
 Options = NexusUI.Options
 
@@ -23,6 +23,14 @@ JumpBoostValue = 80
 ShotPowerEnabled = false
 ShotPowerConnection = nil
 ShotPowerMultiplier = 1.5
+-- BEGIN SHARED SHOT POWER
+function ApplyShotPowerModifier(velocity, multiplier)
+    local factor = multiplier or ShotPowerMultiplier or 1.5
+    if type(factor) ~= "number" or factor ~= factor or math.abs(factor) == math.huge then factor = 1.5 end
+    factor = math.max(0.5, math.min(3, factor))
+    return velocity * factor
+end
+-- END SHARED SHOT POWER
 InfinitePumpFakesEnabled = false
 InfinitePumpFakesThread = nil
 BallController = nil
@@ -1364,16 +1372,34 @@ end
         perfectShotLock = nil
     end
     -- BEGIN PERFECT SHOT BALLISTICS
-    local function shotVelocity(origin, target, gravity)
+    local function shotVelocity(origin, target, gravity, characterDistance, powerMultiplier)
         if type(gravity) ~= "number" or gravity <= 0 then return nil end
         local delta = target - origin
         local distance = Vector2.new(delta.X, delta.Z).Magnitude
-        local height = math.max(8, math.min(45, distance * 0.12))
+        local range = characterDistance or distance
+        if type(range) ~= "number" or range ~= range or range < 0 or range == math.huge then return nil end
+        local height = math.max(8, math.min(45, range * 0.12))
         local apex = math.max(origin.Y, target.Y) + height
         local vertical = math.sqrt(2 * gravity * (apex - origin.Y))
-        local seconds = (vertical + math.sqrt(2 * gravity * (apex - target.Y))) / gravity
+        local baseSeconds = (vertical + math.sqrt(2 * gravity * (apex - target.Y))) / gravity
+        local baseVelocity = Vector3.new(delta.X / baseSeconds, vertical, delta.Z / baseSeconds)
+        local poweredVelocity = ApplyShotPowerModifier(baseVelocity, powerMultiplier)
+        local horizontalSpeed = Vector2.new(poweredVelocity.X, poweredVelocity.Z).Magnitude
+        local seconds = distance > 0.01 and horizontalSpeed > 0.01 and distance / horizontalSpeed or baseSeconds
+        -- Re-solve vertical speed after applying the power multiplier. Maintain
+        -- a descending entry instead of multiplying a solved arc a second time.
+        local clearance = math.max(4, math.min(14, range * 0.025))
+        local minimumApex = math.max(origin.Y, target.Y) + clearance
+        local minimumSeconds = (math.sqrt(2 * gravity * (minimumApex - origin.Y))
+            + math.sqrt(2 * gravity * (minimumApex - target.Y))) / gravity
+        seconds = math.max(seconds, minimumSeconds)
+        if distance <= 0.01 then
+            local upSpeed = math.max(poweredVelocity.Y, math.sqrt(2 * gravity * (minimumApex - origin.Y)))
+            seconds = (upSpeed + math.sqrt(math.max(0, upSpeed * upSpeed - 2 * gravity * delta.Y))) / gravity
+        end
         if seconds <= 0 or seconds ~= seconds or seconds == math.huge then return nil end
-        return Vector3.new(delta.X / seconds, vertical, delta.Z / seconds), seconds
+        local launchY = delta.Y / seconds + gravity * seconds * 0.5
+        return Vector3.new(delta.X / seconds, launchY, delta.Z / seconds), seconds
     end
     -- END PERFECT SHOT BALLISTICS
     local function armPerfect()
@@ -1383,8 +1409,11 @@ end
         if not ball or not hoop or not playing() or not hasBall() then return end
         local now = os.clock()
         samplePerfectLatency(now)
+        local _, root = localParts()
         perfectFlight = {ball = ball, hoop = hoop, character = LocalPlayer.Character,
-            started = now, deadline = now + perfectWaitBudget(), confirmed = false}
+            started = now, deadline = now + perfectWaitBudget(), confirmed = false,
+            powerMultiplier = ShotPowerMultiplier or 1.5,
+            characterDistance = root and (hoop.Position - root.Position).Magnitude or nil}
         perfectShotLock = {ball = ball, expires = perfectFlight.deadline}
     end
     local function updatePerfect(dt)
@@ -1427,7 +1456,9 @@ end
         end
         if not flight.launched then
             if flight.firstLaunch and now - flight.firstLaunch > 8 then clearPerfect(); return end
-            local velocity, duration = shotVelocity(ball.Position, flight.hoop.Position, Workspace.Gravity)
+            local _, root = localParts()
+            local range = root and (flight.hoop.Position - root.Position).Magnitude or flight.characterDistance
+            local velocity, duration = shotVelocity(ball.Position, flight.hoop.Position, Workspace.Gravity, range, flight.powerMultiplier)
             if not velocity then clearPerfect(); return end
             flight.origin, flight.velocity, flight.duration = ball.Position, velocity, duration
             flight.gravity, flight.launched = Workspace.Gravity, now
@@ -1678,12 +1709,6 @@ end
     end
     local function setFeature(key, value)
         config[key] = value == true and not ScriptUnloaded
-        if config[key] and (key == "SilentAimShot" or key == "PerfectShot") then
-            local otherKey = key == "SilentAimShot" and "PerfectShot" or "SilentAimShot"
-            config[otherKey] = false
-            local otherToggle = NexusUI.Toggles and NexusUI.Toggles[otherKey]
-            if otherToggle then otherToggle:SetValue(false) end
-        end
         if key == "AutoDunk" then setAutoDunk(config.AutoDunk) end
         if not config.PerfectShot then clearPerfect() end
         if anyEnabled() then
