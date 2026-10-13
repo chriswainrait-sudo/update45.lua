@@ -1906,26 +1906,18 @@ do
     local function finite(value)
         return type(value) == "number" and value == value and math.abs(value) < math.huge
     end
-    local function segmentDistance(px, pz, ax, az, bx, bz)
-        local dx, dz = bx - ax, bz - az
-        local length = dx * dx + dz * dz
-        local t = length > 0 and ((px - ax) * dx + (pz - az) * dz) / length or 0
-        t = math.max(0, math.min(1, t))
-        local x, z = px - ax - t * dx, pz - az - t * dz
-        return math.sqrt(x * x + z * z)
-    end
     local function facingAllowed(dot, threshold)
         return finite(dot) and finite(threshold) and dot >= threshold
     end
     -- END SUPPORT MATH
 
-    local config = {AutoSteal = false, PassESP = false, StealRange = 12}
+    local config = {AutoSteal = false, StealRange = 12}
     local controllers, connections = {}, {}
-    local heartbeat, discoveryTask, gui, passHighlight, passLabel
+    local heartbeat, discoveryTask
     local generation, lastTick, lastDiscovery, nextSteal = 0, 0, -math.huge, 0
     local running, actionBusy, warned = false, false, false
     local function anyEnabled()
-        return config.AutoSteal or config.PassESP
+        return config.AutoSteal
     end
     local function connect(signal, fn)
         connections[#connections + 1] = signal:Connect(fn)
@@ -2016,40 +2008,6 @@ do
             end
         end)
     end
-    local function ensureGui()
-        if gui and gui.Parent then return end
-        gui = Instance.new("ScreenGui")
-        gui.Name = "PrimeSmartSupport"
-        gui.ResetOnSpawn, gui.IgnoreGuiInset, gui.DisplayOrder = false, true, 92
-        gui.Parent = GuiParent
-        passLabel = Instance.new("TextLabel")
-        passLabel.Name = "PassMarker"
-        passLabel.Size = UDim2.fromOffset(230, 36)
-        passLabel.AnchorPoint = Vector2.new(0.5, 0.5)
-        passLabel.BackgroundTransparency = 1
-        passLabel.TextColor3 = Color3.fromRGB(80, 240, 130)
-        passLabel.TextStrokeTransparency, passLabel.TextSize = 0.2, 13
-        passLabel.Font = Enum.Font.GothamBold
-        passLabel.Visible, passLabel.Parent = false, gui
-        passHighlight = Instance.new("Highlight")
-        passHighlight.Name = "OpenPassTarget"
-        passHighlight.FillColor, passHighlight.OutlineColor = Color3.fromRGB(80, 240, 130), Color3.fromRGB(255, 255, 255)
-        passHighlight.FillTransparency = 0.75
-        passHighlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-        passHighlight.Enabled, passHighlight.Parent = false, gui
-    end
-    local function hide()
-        if passLabel then passLabel.Visible = false end
-        if passHighlight then passHighlight.Enabled = false; passHighlight.Adornee = nil end
-    end
-    local function visibleLabel(label, position, text)
-        local camera = Workspace.CurrentCamera
-        if not camera then return end
-        local point, onScreen = camera:WorldToViewportPoint(position)
-        label.Visible = onScreen and point.Z > 0
-        label.Position = UDim2.fromOffset(point.X, point.Y)
-        label.Text = text
-    end
     local function lineClear(from, to, exclusions)
         local params = RaycastParams.new()
         params.FilterType = Enum.RaycastFilterType.Exclude
@@ -2097,49 +2055,10 @@ do
             if generation == epoch then actionBusy = false end
         end)
     end
-    local function passTarget(character, root, ball)
-        if not config.PassESP then return end
-        local owner, known = call(controllers.BallController, "GetPlayerPossessingBall")
-        if not known or owner ~= LocalPlayer then return end
-        local teammates, enemies, exclusions = {}, {}, {character}
-        if ball then exclusions[#exclusions + 1] = ball end
-        for _, player in ipairs(Players:GetPlayers()) do
-            if player ~= LocalPlayer and activePlayer(player) then
-                local other, otherRoot = parts(player)
-                if otherRoot then
-                    exclusions[#exclusions + 1] = other
-                    local list = player.Team == LocalPlayer.Team and teammates or enemies
-                    list[#list + 1] = {player = player, character = other, root = otherRoot}
-                end
-            end
-        end
-        local best, bestScore = nil, -math.huge
-        for _, teammate in ipairs(teammates) do
-            local point = teammate.root.Position
-            local distance = (point - root.Position).Magnitude
-            if distance >= 8 and distance <= 180 then
-                local gap, lane = 60, 60
-                for _, enemy in ipairs(enemies) do
-                    local e = enemy.root.Position
-                    gap = math.min(gap, (e - point).Magnitude)
-                    lane = math.min(lane, segmentDistance(e.X, e.Z, root.Position.X, root.Position.Z, point.X, point.Z))
-                end
-                local score = gap + lane * 0.5 - distance * 0.08
-                if gap >= 10 and lane >= 6 and score > bestScore and lineClear(root.Position, point, exclusions) then
-                    best, bestScore = teammate, score
-                end
-            end
-        end
-        if best then
-            passHighlight.Adornee, passHighlight.Enabled = best.character, true
-            visibleLabel(passLabel, best.root.Position + Vector3.new(0, 4, 0), "OPEN PASS: " .. best.player.DisplayName)
-        end
-    end
     local function reset()
         generation = generation + 1
         if discoveryTask then pcall(task.cancel, discoveryTask); discoveryTask = nil end
         controllers, actionBusy, nextSteal, lastDiscovery = {}, false, 0, -math.huge
-        hide()
     end
     local function stop()
         running = false
@@ -2147,8 +2066,6 @@ do
         if heartbeat then heartbeat:Disconnect(); heartbeat = nil end
         for _, connection in ipairs(connections) do connection:Disconnect() end
         connections = {}
-        if gui then gui:Destroy() end
-        gui, passHighlight, passLabel = nil, nil, nil
     end
     local function start()
         if running or ScriptUnloaded then return end
@@ -2169,16 +2086,12 @@ do
             local now = os.clock()
             if now - lastTick < 0.08 then return end
             lastTick = now
-            hide()
             if not playing() then return end
             if now - lastDiscovery >= 3 then lastDiscovery = now; discover() end
             local character, root, humanoid = parts(LocalPlayer)
             if not root then return end
             local ok, err = pcall(function()
-                if config.PassESP then ensureGui() end
-                local ball = GetCurrentBall()
                 autoSteal(now, character, root, humanoid)
-                passTarget(character, root, ball)
             end)
             if not ok and not warned then
                 warned = true
@@ -2189,7 +2102,6 @@ do
     Tabs.Main:AddSection("Smart Support", "Right")
     for _, control in ipairs({
         {"AutoSteal", "Smart Auto Steal", "Uses the ordinary Steal action only in range, facing the carrier and outside ball protection"},
-        {"PassESP", "Open Pass Target ESP", "Highlights a teammate with a clear lane and distance from defenders"},
     }) do
         local key = control[1]
         Tabs.Main:AddToggle("PRIME_SS_" .. key, {Title = control[2], Description = control[3], Default = false,
@@ -2205,7 +2117,7 @@ do
     end
     Tabs.Main:SetActiveSection(MainSection)
     RegisterUnloadCallback(function()
-        for _, key in ipairs({"AutoSteal", "PassESP"}) do config[key] = false end
+        for _, key in ipairs({"AutoSteal"}) do config[key] = false end
         stop()
     end)
 end
