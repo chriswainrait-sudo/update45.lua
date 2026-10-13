@@ -1351,23 +1351,10 @@ end
         end
         if hasBall() then resetDribbleCounters(infinitePatch) end
     end
-    local latencyRtt, latencyJitter, latencyDelivery = 0, 0, 0
-    local lastLatencyPoll, latencyKnown = -math.huge, false
-    local function samplePerfectLatency(now)
-        if now - lastLatencyPoll < 1 then return end
-        lastLatencyPoll = now
-        -- Native LocalPlayer API, seconds of round-trip latency. No probe remotes.
-        local ok, value = pcall(function() return LocalPlayer:GetNetworkPing() end)
-        if not ok or type(value) ~= "number" or value ~= value or value < 0 or value == math.huge then return end
-        value = math.min(value, 3)
-        if not latencyKnown then latencyRtt, latencyKnown = value, true; return end
-        latencyJitter = latencyJitter * 0.8 + math.abs(value - latencyRtt) * 0.2
-        latencyRtt = latencyRtt * 0.8 + value * 0.2
-    end
-    local function perfectWaitBudget()
-        return math.min(8, 2 + math.max(latencyRtt, latencyDelivery) * 2 + latencyJitter * 4)
-    end
+    local perfectPhysics
+    local updatePerfect
     local function clearPerfect()
+        if perfectPhysics then perfectPhysics:Disconnect(); perfectPhysics = nil end
         perfectFlight = nil
         perfectShotLock = nil
     end
@@ -1408,23 +1395,29 @@ end
         local hoop = targetHoop()
         if not ball or not hoop or not playing() or not hasBall() then return end
         local now = os.clock()
-        samplePerfectLatency(now)
         local _, root = localParts()
         perfectFlight = {ball = ball, hoop = hoop, character = LocalPlayer.Character,
-            started = now, deadline = now + perfectWaitBudget(), confirmed = false,
+            started = now, deadline = now + 2, confirmed = false,
             powerMultiplier = ShotPowerMultiplier or 1.5,
             characterDistance = root and (hoop.Position - root.Position).Magnitude or nil}
         perfectShotLock = {ball = ball, expires = perfectFlight.deadline}
+        -- Only this pending/released shot owns a physics callback. No idle
+        -- correction loop and no Heartbeat fallback on unsupported runtimes.
+        local ok, connection = pcall(function()
+            return RunService.PreSimulation:Connect(function(dt)
+                local success = pcall(updatePerfect, dt)
+                if not success then clearPerfect() end
+            end)
+        end)
+        if ok then perfectPhysics = connection else clearPerfect() end
     end
-    local function updatePerfect(dt)
+    updatePerfect = function(dt)
         local flight = perfectFlight
         if not flight then return end
         local ball, controller = flight.ball, controllers.BallController
         local character, _, humanoid = localParts()
         local now = os.clock()
-        samplePerfectLatency(now)
         if not flight.launched then
-            flight.deadline = math.max(flight.deadline, flight.started + perfectWaitBudget())
             if perfectShotLock then perfectShotLock.expires = flight.deadline end
             if now > flight.deadline then clearPerfect(); return end
         end
@@ -1444,15 +1437,15 @@ end
         if not success or not controlled or ball.Anchored then
             if flight.launched then
                 flight.pausedAt = flight.pausedAt or now
-                local grace = math.min(0.8, math.max(0.05, latencyRtt + latencyJitter * 4))
+                local grace = 0.15
                 if now - flight.pausedAt > grace then clearPerfect() end
             end
             return
         end
         if flight.pausedAt then
-            -- Resume from the actual ball position, never advance it by ping.
+            -- Resume from the actual ball position.
             flight.pausedAt, flight.launched = nil, nil
-            flight.deadline = now + perfectWaitBudget()
+            flight.deadline = now + 2
         end
         if not flight.launched then
             if flight.firstLaunch and now - flight.firstLaunch > 8 then clearPerfect(); return end
@@ -1474,7 +1467,7 @@ end
         local gravity = Vector3.new(0, -flight.gravity, 0)
         local expected = flight.origin + flight.velocity * elapsed + gravity * (elapsed * elapsed * 0.5)
         local error = expected - ball.Position
-        local positionTolerance = 25 + math.min(25, flight.velocity.Magnitude * (latencyRtt * 0.5 + latencyJitter))
+        local positionTolerance = 25
         if error.Magnitude > positionTolerance then clearPerfect(); return end
         local correction = error * 8
         if correction.Magnitude > 35 then correction = correction.Unit * 35 end
@@ -1505,15 +1498,7 @@ end
         if type(signal.Connect) == "function" then
             patch.received = signal:Connect(function(destination)
                 if throwPatch == patch and perfectFlight and typeof(destination) == "Vector3" then
-                    local flight = perfectFlight
-                    if not flight.confirmed then
-                        local now = os.clock()
-                        local delivered = math.min(3, math.max(0, now - flight.started))
-                        latencyDelivery = latencyDelivery == 0 and delivered or latencyDelivery * 0.8 + delivered * 0.2
-                        flight.deadline = math.min(flight.started + 8,
-                            math.max(flight.deadline, now + math.max(0.25, latencyRtt + latencyJitter * 4)))
-                        flight.confirmed = true
-                    end
+                    perfectFlight.confirmed = true
                 end
             end)
         end
@@ -1685,7 +1670,6 @@ end
             end
             updateSilentAim()
             updateInfinite()
-            updatePerfect(dt)
             if now - lastThreatCheck < 0.04 then return end
             lastThreatCheck = now
             local character, root, humanoid = localParts()
