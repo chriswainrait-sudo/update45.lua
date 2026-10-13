@@ -1897,15 +1897,6 @@ do
     local function finite(value)
         return type(value) == "number" and value == value and math.abs(value) < math.huge
     end
-    local function descendingTime(height, verticalSpeed, gravity, horizon)
-        if not finite(height) or not finite(verticalSpeed) or not finite(gravity)
-            or not finite(horizon) or gravity <= 0 or horizon <= 0 then return nil end
-        local discriminant = verticalSpeed * verticalSpeed + 2 * gravity * height
-        if discriminant < 0 then return nil end
-        local t = (verticalSpeed + math.sqrt(discriminant)) / gravity
-        if t <= 0 or t > horizon then return nil end
-        return t
-    end
     local function segmentDistance(px, pz, ax, az, bx, bz)
         local dx, dz = bx - ax, bz - az
         local length = dx * dx + dz * dz
@@ -1919,14 +1910,13 @@ do
     end
     -- END SUPPORT MATH
 
-    local config = {AutoSteal = false, AutoRebound = false, ReboundESP = false,
-        PassESP = false, StealRange = 12, ReboundRange = 6}
+    local config = {AutoSteal = false, PassESP = false, StealRange = 12}
     local controllers, connections = {}, {}
-    local heartbeat, discoveryTask, gui, reboundLabel, passHighlight, passLabel
-    local generation, lastTick, lastDiscovery, nextSteal, nextJump = 0, 0, -math.huge, 0, 0
+    local heartbeat, discoveryTask, gui, passHighlight, passLabel
+    local generation, lastTick, lastDiscovery, nextSteal = 0, 0, -math.huge, 0
     local running, actionBusy, warned = false, false, false
     local function anyEnabled()
-        return config.AutoSteal or config.AutoRebound or config.ReboundESP or config.PassESP
+        return config.AutoSteal or config.PassESP
     end
     local function connect(signal, fn)
         connections[#connections + 1] = signal:Connect(fn)
@@ -2023,26 +2013,23 @@ do
         gui.Name = "PrimeSmartSupport"
         gui.ResetOnSpawn, gui.IgnoreGuiInset, gui.DisplayOrder = false, true, 92
         gui.Parent = GuiParent
-        reboundLabel = Instance.new("TextLabel")
-        reboundLabel.Name = "ReboundMarker"
-        reboundLabel.Size = UDim2.fromOffset(230, 36)
-        reboundLabel.AnchorPoint = Vector2.new(0.5, 0.5)
-        reboundLabel.BackgroundTransparency = 1
-        reboundLabel.TextColor3 = Color3.fromRGB(100, 225, 255)
-        reboundLabel.TextStrokeTransparency, reboundLabel.TextSize = 0.2, 13
-        reboundLabel.Font = Enum.Font.GothamBold
-        reboundLabel.Visible, reboundLabel.Parent = false, gui
+        passLabel = Instance.new("TextLabel")
+        passLabel.Name = "PassMarker"
+        passLabel.Size = UDim2.fromOffset(230, 36)
+        passLabel.AnchorPoint = Vector2.new(0.5, 0.5)
+        passLabel.BackgroundTransparency = 1
+        passLabel.TextColor3 = Color3.fromRGB(80, 240, 130)
+        passLabel.TextStrokeTransparency, passLabel.TextSize = 0.2, 13
+        passLabel.Font = Enum.Font.GothamBold
+        passLabel.Visible, passLabel.Parent = false, gui
         passHighlight = Instance.new("Highlight")
         passHighlight.Name = "OpenPassTarget"
         passHighlight.FillColor, passHighlight.OutlineColor = Color3.fromRGB(80, 240, 130), Color3.fromRGB(255, 255, 255)
         passHighlight.FillTransparency = 0.75
         passHighlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
         passHighlight.Enabled, passHighlight.Parent = false, gui
-        passLabel = reboundLabel:Clone()
-        passLabel.Name, passLabel.TextColor3, passLabel.Parent = "PassMarker", Color3.fromRGB(80, 240, 130), gui
     end
     local function hide()
-        if reboundLabel then reboundLabel.Visible = false end
         if passLabel then passLabel.Visible = false end
         if passHighlight then passHighlight.Enabled = false; passHighlight.Adornee = nil end
     end
@@ -2101,38 +2088,6 @@ do
             if generation == epoch then actionBusy = false end
         end)
     end
-    local function rebound(now, character, root, humanoid, ball)
-        if not (config.AutoRebound or config.ReboundESP) or not ball or ball.Anchored then return end
-        local owner, known = call(controllers.BallController, "GetPlayerPossessingBall")
-        if not known or owner ~= nil then return end
-        local velocity, gravity = ball.AssemblyLinearVelocity, Workspace.Gravity
-        local targetHeight = root.Position.Y + 3
-        local t = descendingTime(ball.Position.Y - targetHeight, velocity.Y, gravity, 1.5)
-        if config.ReboundESP and t then
-            local position = ball.Position + velocity * t + Vector3.new(0, -gravity * t * t / 2, 0)
-            visibleLabel(reboundLabel, position, string.format("REBOUND ~%.2fs", t))
-        end
-        if not config.AutoRebound or now < nextJump or velocity.Y >= -1 or ball.Position.Y <= targetHeight
-            or not allowed(character, humanoid) or humanoid.FloorMaterial == Enum.Material.Air
-            or not humanoid:GetStateEnabled(Enum.HumanoidStateType.Jumping) or gravity <= 0 then return end
-        local jumpSpeed = humanoid.UseJumpPower and humanoid.JumpPower or math.sqrt(2 * gravity * math.max(0, humanoid.JumpHeight))
-        if jumpSpeed <= 0 then return end
-        local horizon = math.min(0.7, jumpSpeed / gravity)
-        local rootVelocity = root.AssemblyLinearVelocity * Vector3.new(1, 0, 1)
-        if rootVelocity.Magnitude > math.max(1, humanoid.WalkSpeed) then rootVelocity = Vector3.zero end
-        for step = 1, 10 do
-            local sample = horizon * step / 10
-            local expected = ball.Position + velocity * sample + Vector3.new(0, -gravity * sample * sample / 2, 0)
-            local hand = root.Position + rootVelocity * sample + Vector3.new(0, 3 + jumpSpeed * sample - gravity * sample * sample / 2, 0)
-            local delta = expected - hand
-            if math.abs(delta.Y) <= 2.5 and Vector3.new(delta.X, 0, delta.Z).Magnitude <= config.ReboundRange
-                and lineClear(root.Position + Vector3.new(0, 2, 0), expected, {character, ball}) then
-                humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
-                nextJump = now + 0.75
-                return
-            end
-        end
-    end
     local function passTarget(character, root, ball)
         if not config.PassESP then return end
         local owner, known = call(controllers.BallController, "GetPlayerPossessingBall")
@@ -2174,7 +2129,7 @@ do
     local function reset()
         generation = generation + 1
         if discoveryTask then pcall(task.cancel, discoveryTask); discoveryTask = nil end
-        controllers, actionBusy, nextSteal, nextJump, lastDiscovery = {}, false, 0, 0, -math.huge
+        controllers, actionBusy, nextSteal, lastDiscovery = {}, false, 0, -math.huge
         hide()
     end
     local function stop()
@@ -2184,7 +2139,7 @@ do
         for _, connection in ipairs(connections) do connection:Disconnect() end
         connections = {}
         if gui then gui:Destroy() end
-        gui, reboundLabel, passHighlight, passLabel = nil, nil, nil, nil
+        gui, passHighlight, passLabel = nil, nil, nil
     end
     local function start()
         if running or ScriptUnloaded then return end
@@ -2211,10 +2166,9 @@ do
             local character, root, humanoid = parts(LocalPlayer)
             if not root then return end
             local ok, err = pcall(function()
-                if config.ReboundESP or config.PassESP then ensureGui() end
+                if config.PassESP then ensureGui() end
                 local ball = GetCurrentBall()
                 autoSteal(now, character, root, humanoid)
-                rebound(now, character, root, humanoid, ball)
                 passTarget(character, root, ball)
             end)
             if not ok and not warned then
@@ -2226,8 +2180,6 @@ do
     Tabs.Main:AddSection("Smart Support", "Right")
     for _, control in ipairs({
         {"AutoSteal", "Smart Auto Steal", "Uses the ordinary Steal action only in range, facing the carrier and outside ball protection"},
-        {"AutoRebound", "Auto Rebound Jump", "Times a normal jump against a descending free ball; does not move or teleport you"},
-        {"ReboundESP", "Rebound Point ESP", "Shows an estimated free-ball crossing at catch height; collisions can change it"},
         {"PassESP", "Open Pass Target ESP", "Highlights a teammate with a clear lane and distance from defenders"},
     }) do
         local key = control[1]
@@ -2237,14 +2189,14 @@ do
                 if anyEnabled() then start() else stop() end
             end})
     end
-    for _, control in ipairs({{"StealRange", "Auto Steal Range", 3, 15}, {"ReboundRange", "Rebound Reach", 2, 10}}) do
+    for _, control in ipairs({{"StealRange", "Auto Steal Range", 3, 15}}) do
         local key = control[1]
         Tabs.Main:AddSlider("PRIME_SS_" .. key, {Title = control[2], Default = config[key], Min = control[3], Max = control[4], Step = 1, Rounding = 0,
             Callback = function(value) if finite(value) then config[key] = math.max(control[3], math.min(control[4], value)) end end})
     end
     Tabs.Main:SetActiveSection(MainSection)
     RegisterUnloadCallback(function()
-        for _, key in ipairs({"AutoSteal", "AutoRebound", "ReboundESP", "PassESP"}) do config[key] = false end
+        for _, key in ipairs({"AutoSteal", "PassESP"}) do config[key] = false end
         stop()
     end)
 end
