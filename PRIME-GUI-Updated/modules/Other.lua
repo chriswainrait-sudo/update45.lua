@@ -172,7 +172,7 @@ Tabs.Misc:AddToggle("ShotPowerModifier", {
                 
                 if currentVel.Magnitude > 5 and (currentTime - lastShotTime) > SHOT_COOLDOWN then
                     lastShotTime = currentTime
-                    ball.AssemblyLinearVelocity = currentVel * ShotPowerMultiplier
+                    ball.AssemblyLinearVelocity = ApplyShotPowerModifier(currentVel, ShotPowerMultiplier)
                 end
             end))
         else
