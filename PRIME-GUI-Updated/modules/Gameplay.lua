@@ -1891,6 +1891,366 @@ end
     end)
 end
 
+-- BEGIN PRIME SMART SUPPORT v1
+do
+    -- BEGIN SUPPORT MATH (no Roblox dependencies)
+    local function finite(value)
+        return type(value) == "number" and value == value and math.abs(value) < math.huge
+    end
+    local function descendingTime(height, verticalSpeed, gravity, horizon)
+        if not finite(height) or not finite(verticalSpeed) or not finite(gravity)
+            or not finite(horizon) or gravity <= 0 or horizon <= 0 then return nil end
+        local discriminant = verticalSpeed * verticalSpeed + 2 * gravity * height
+        if discriminant < 0 then return nil end
+        local t = (verticalSpeed + math.sqrt(discriminant)) / gravity
+        if t <= 0 or t > horizon then return nil end
+        return t
+    end
+    local function segmentDistance(px, pz, ax, az, bx, bz)
+        local dx, dz = bx - ax, bz - az
+        local length = dx * dx + dz * dz
+        local t = length > 0 and ((px - ax) * dx + (pz - az) * dz) / length or 0
+        t = math.max(0, math.min(1, t))
+        local x, z = px - ax - t * dx, pz - az - t * dz
+        return math.sqrt(x * x + z * z)
+    end
+    local function facingAllowed(dot, threshold)
+        return finite(dot) and finite(threshold) and dot >= threshold
+    end
+    -- END SUPPORT MATH
+
+    local config = {AutoSteal = false, AutoRebound = false, ReboundESP = false,
+        PassESP = false, StealRange = 12, ReboundRange = 6}
+    local controllers, connections = {}, {}
+    local heartbeat, discoveryTask, gui, reboundLabel, passHighlight, passLabel
+    local generation, lastTick, lastDiscovery, nextSteal, nextJump = 0, 0, -math.huge, 0, 0
+    local running, actionBusy, warned = false, false, false
+    local function anyEnabled()
+        return config.AutoSteal or config.AutoRebound or config.ReboundESP or config.PassESP
+    end
+    local function connect(signal, fn)
+        connections[#connections + 1] = signal:Connect(fn)
+    end
+    local function parts(player)
+        local character = player and player.Character
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if root and humanoid and humanoid.Health > 0 then return character, root, humanoid end
+    end
+    local function activePlayer(player)
+        return player and player.Team and not player.Neutral and player.Team.Name ~= "Visitor"
+    end
+    local function call(object, method)
+        if type(object) ~= "table" or type(object[method]) ~= "function" then return nil, false end
+        local ok, value = pcall(object[method], object)
+        return value, ok
+    end
+    local function playing()
+        if ScriptUnloaded or not activePlayer(LocalPlayer) then return false end
+        local values = ReplicatedStorage:FindFirstChild("GameValues")
+        local state = values and values:FindFirstChild("State")
+        if not state or state.Value ~= "Playing" then return false end
+        for _, name in ipairs({"Scoring", "TipOff", "PositionReset"}) do
+            local value = values:FindFirstChild(name)
+            if value and value.Value then return false end
+        end
+        local barrier = Workspace:FindFirstChild("BARRIER")
+        if barrier and barrier:IsA("BasePart") and barrier.CanCollide then return false end
+        return true
+    end
+    local function allowed(character, humanoid)
+        if not character or not humanoid or humanoid.Health <= 0 or humanoid.Sit
+            or userInputService:GetFocusedTextBox() then return false end
+        local camera = Workspace.CurrentCamera
+        if not camera or camera.CameraType == Enum.CameraType.Scriptable then return false end
+        local ragdoll = character:FindFirstChild("IsRagdoll")
+        if ragdoll and ragdoll:IsA("BoolValue") and ragdoll.Value then return false end
+        local movement = controllers.MovementController
+        local states = movement and movement.States
+        if type(states) ~= "table" then return false end
+        for _, name in ipairs({"Stunned", "Shooting", "AimAssist", "Dunking", "Ability", "PumpFake", "Stealing"}) do
+            if states[name] then return false end
+        end
+        local blocked, ok = call(controllers.BallController, "NoAction")
+        return ok and blocked == false
+    end
+    local function discover()
+        if discoveryTask or not running then return end
+        local epoch = generation
+        discoveryTask = task.defer(function()
+            local found = {}
+            local packages = ReplicatedStorage:FindFirstChild("Packages")
+            local knitModule = packages and packages:FindFirstChild("Knit")
+            if knitModule and knitModule:IsA("ModuleScript") then
+                local ok, knit = pcall(require, knitModule)
+                if ok and type(knit) == "table" and type(knit.GetController) == "function" then
+                    for _, name in ipairs({"BallController", "DefenseController", "MovementController"}) do
+                        local success, object = pcall(knit.GetController, name)
+                        if success and type(object) == "table" then found[name] = object end
+                    end
+                end
+            end
+            if (not found.BallController or not found.DefenseController or not found.MovementController)
+                and type(getgc) == "function" then
+                local ok, objects = pcall(getgc, true)
+                if ok and type(objects) == "table" then
+                    local signatures = {BallController = "GetPlayerPossessingBall",
+                        DefenseController = "Steal", MovementController = "States"}
+                    local visited = 0
+                    for _, object in pairs(objects) do
+                        if not running or generation ~= epoch then return end
+                        if type(object) == "table" then
+                            local name = rawget(object, "Name")
+                            local key = signatures[name]
+                            if key and not found[name] and type(rawget(object, key)) == (key == "States" and "table" or "function") then
+                                found[name] = object
+                            end
+                        end
+                        visited = visited + 1
+                        if visited % 2000 == 0 then task.wait() end
+                    end
+                end
+            end
+            if running and generation == epoch then
+                controllers = found
+                discoveryTask = nil
+            end
+        end)
+    end
+    local function ensureGui()
+        if gui and gui.Parent then return end
+        gui = Instance.new("ScreenGui")
+        gui.Name = "PrimeSmartSupport"
+        gui.ResetOnSpawn, gui.IgnoreGuiInset, gui.DisplayOrder = false, true, 92
+        gui.Parent = GuiParent
+        reboundLabel = Instance.new("TextLabel")
+        reboundLabel.Name = "ReboundMarker"
+        reboundLabel.Size = UDim2.fromOffset(230, 36)
+        reboundLabel.AnchorPoint = Vector2.new(0.5, 0.5)
+        reboundLabel.BackgroundTransparency = 1
+        reboundLabel.TextColor3 = Color3.fromRGB(100, 225, 255)
+        reboundLabel.TextStrokeTransparency, reboundLabel.TextSize = 0.2, 13
+        reboundLabel.Font = Enum.Font.GothamBold
+        reboundLabel.Visible, reboundLabel.Parent = false, gui
+        passHighlight = Instance.new("Highlight")
+        passHighlight.Name = "OpenPassTarget"
+        passHighlight.FillColor, passHighlight.OutlineColor = Color3.fromRGB(80, 240, 130), Color3.fromRGB(255, 255, 255)
+        passHighlight.FillTransparency = 0.75
+        passHighlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        passHighlight.Enabled, passHighlight.Parent = false, gui
+        passLabel = reboundLabel:Clone()
+        passLabel.Name, passLabel.TextColor3, passLabel.Parent = "PassMarker", Color3.fromRGB(80, 240, 130), gui
+    end
+    local function hide()
+        if reboundLabel then reboundLabel.Visible = false end
+        if passLabel then passLabel.Visible = false end
+        if passHighlight then passHighlight.Enabled = false; passHighlight.Adornee = nil end
+    end
+    local function visibleLabel(label, position, text)
+        local camera = Workspace.CurrentCamera
+        if not camera then return end
+        local point, onScreen = camera:WorldToViewportPoint(position)
+        label.Visible = onScreen and point.Z > 0
+        label.Position = UDim2.fromOffset(point.X, point.Y)
+        label.Text = text
+    end
+    local function lineClear(from, to, exclusions)
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = exclusions
+        params.IgnoreWater = true
+        return Workspace:Raycast(from, to - from, params) == nil
+    end
+    local function stealEligible(character, root, humanoid)
+        if not playing() or not allowed(character, humanoid) or humanoid.FloorMaterial == Enum.Material.Air then return false end
+        local ballController = controllers.BallController
+        local owner, ownerKnown = call(ballController, "GetPlayerPossessingBall")
+        if not ownerKnown or not activePlayer(owner) or owner == LocalPlayer or owner.Team == LocalPlayer.Team then return false end
+        -- These are the game's real local copies, not guesses based on animations.
+        local protected, known = call(ballController, "BallIFrameIsActive")
+        if not known or protected ~= false then return false end
+        local teamProtected, teamKnown = call(ballController, "BallTeamIFrameIsActive")
+        if not teamKnown or teamProtected ~= false then return false end
+        local enemy, enemyRoot = parts(owner)
+        if not enemyRoot then return false end
+        local delta = enemyRoot.Position - root.Position
+        if delta.Magnitude > config.StealRange or delta.Magnitude < 0.01 then return false end
+        local flat = Vector3.new(delta.X, 0, delta.Z)
+        if flat.Magnitude < 0.01 or not facingAllowed(root.CFrame.LookVector:Dot(flat.Unit), 0.35) then return false end
+        local ball = GetCurrentBall()
+        local exclusions = {character, enemy}
+        if ball then exclusions[#exclusions + 1] = ball end
+        return lineClear(root.Position, enemyRoot.Position, exclusions)
+    end
+    local function autoSteal(now, character, root, humanoid)
+        if not config.AutoSteal or actionBusy or now < nextSteal or not stealEligible(character, root, humanoid) then return end
+        local defense = controllers.DefenseController
+        if not defense or type(defense.Steal) ~= "function" then return end
+        actionBusy, nextSteal = true, now + 0.35
+        local epoch = generation
+        task.defer(function()
+            if running and generation == epoch and config.AutoSteal and LocalPlayer.Character == character
+                and stealEligible(character, root, humanoid) then
+                local ok = pcall(defense.Steal, defense)
+                local movement = controllers.MovementController
+                if ok and movement and movement.States.Stealing then
+                    -- Controller's own cooldown remains authoritative; throttle retries too.
+                    nextSteal = os.clock() + 0.8
+                end
+            end
+            if generation == epoch then actionBusy = false end
+        end)
+    end
+    local function rebound(now, character, root, humanoid, ball)
+        if not (config.AutoRebound or config.ReboundESP) or not ball or ball.Anchored then return end
+        local owner, known = call(controllers.BallController, "GetPlayerPossessingBall")
+        if not known or owner ~= nil then return end
+        local velocity, gravity = ball.AssemblyLinearVelocity, Workspace.Gravity
+        local targetHeight = root.Position.Y + 3
+        local t = descendingTime(ball.Position.Y - targetHeight, velocity.Y, gravity, 1.5)
+        if config.ReboundESP and t then
+            local position = ball.Position + velocity * t + Vector3.new(0, -gravity * t * t / 2, 0)
+            visibleLabel(reboundLabel, position, string.format("REBOUND ~%.2fs", t))
+        end
+        if not config.AutoRebound or now < nextJump or velocity.Y >= -1 or ball.Position.Y <= targetHeight
+            or not allowed(character, humanoid) or humanoid.FloorMaterial == Enum.Material.Air
+            or not humanoid:GetStateEnabled(Enum.HumanoidStateType.Jumping) or gravity <= 0 then return end
+        local jumpSpeed = humanoid.UseJumpPower and humanoid.JumpPower or math.sqrt(2 * gravity * math.max(0, humanoid.JumpHeight))
+        if jumpSpeed <= 0 then return end
+        local horizon = math.min(0.7, jumpSpeed / gravity)
+        local rootVelocity = root.AssemblyLinearVelocity * Vector3.new(1, 0, 1)
+        if rootVelocity.Magnitude > math.max(1, humanoid.WalkSpeed) then rootVelocity = Vector3.zero end
+        for step = 1, 10 do
+            local sample = horizon * step / 10
+            local expected = ball.Position + velocity * sample + Vector3.new(0, -gravity * sample * sample / 2, 0)
+            local hand = root.Position + rootVelocity * sample + Vector3.new(0, 3 + jumpSpeed * sample - gravity * sample * sample / 2, 0)
+            local delta = expected - hand
+            if math.abs(delta.Y) <= 2.5 and Vector3.new(delta.X, 0, delta.Z).Magnitude <= config.ReboundRange
+                and lineClear(root.Position + Vector3.new(0, 2, 0), expected, {character, ball}) then
+                humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+                nextJump = now + 0.75
+                return
+            end
+        end
+    end
+    local function passTarget(character, root, ball)
+        if not config.PassESP then return end
+        local owner, known = call(controllers.BallController, "GetPlayerPossessingBall")
+        if not known or owner ~= LocalPlayer then return end
+        local teammates, enemies, exclusions = {}, {}, {character}
+        if ball then exclusions[#exclusions + 1] = ball end
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and activePlayer(player) then
+                local other, otherRoot = parts(player)
+                if otherRoot then
+                    exclusions[#exclusions + 1] = other
+                    local list = player.Team == LocalPlayer.Team and teammates or enemies
+                    list[#list + 1] = {player = player, character = other, root = otherRoot}
+                end
+            end
+        end
+        local best, bestScore = nil, -math.huge
+        for _, teammate in ipairs(teammates) do
+            local point = teammate.root.Position
+            local distance = (point - root.Position).Magnitude
+            if distance >= 8 and distance <= 180 then
+                local gap, lane = 60, 60
+                for _, enemy in ipairs(enemies) do
+                    local e = enemy.root.Position
+                    gap = math.min(gap, (e - point).Magnitude)
+                    lane = math.min(lane, segmentDistance(e.X, e.Z, root.Position.X, root.Position.Z, point.X, point.Z))
+                end
+                local score = gap + lane * 0.5 - distance * 0.08
+                if gap >= 10 and lane >= 6 and score > bestScore and lineClear(root.Position, point, exclusions) then
+                    best, bestScore = teammate, score
+                end
+            end
+        end
+        if best then
+            passHighlight.Adornee, passHighlight.Enabled = best.character, true
+            visibleLabel(passLabel, best.root.Position + Vector3.new(0, 4, 0), "OPEN PASS: " .. best.player.DisplayName)
+        end
+    end
+    local function reset()
+        generation = generation + 1
+        if discoveryTask then pcall(task.cancel, discoveryTask); discoveryTask = nil end
+        controllers, actionBusy, nextSteal, nextJump, lastDiscovery = {}, false, 0, 0, -math.huge
+        hide()
+    end
+    local function stop()
+        running = false
+        reset()
+        if heartbeat then heartbeat:Disconnect(); heartbeat = nil end
+        for _, connection in ipairs(connections) do connection:Disconnect() end
+        connections = {}
+        if gui then gui:Destroy() end
+        gui, reboundLabel, passHighlight, passLabel = nil, nil, nil, nil
+    end
+    local function start()
+        if running or ScriptUnloaded then return end
+        running, warned, lastTick = true, false, 0
+        reset()
+        connect(LocalPlayer.CharacterAdded, reset)
+        connect(LocalPlayer.CharacterRemoving, reset)
+        connect(LocalPlayer:GetPropertyChangedSignal("Team"), reset)
+        local values = ReplicatedStorage:FindFirstChild("GameValues")
+        if values then
+            for _, name in ipairs({"State", "TipOff", "PositionReset"}) do
+                local value = values:FindFirstChild(name)
+                if value then connect(value:GetPropertyChangedSignal("Value"), reset) end
+            end
+        end
+        heartbeat = RunService.Heartbeat:Connect(function()
+            if ScriptUnloaded or not anyEnabled() then stop(); return end
+            local now = os.clock()
+            if now - lastTick < 0.08 then return end
+            lastTick = now
+            hide()
+            if not playing() then return end
+            if now - lastDiscovery >= 3 then lastDiscovery = now; discover() end
+            local character, root, humanoid = parts(LocalPlayer)
+            if not root then return end
+            local ok, err = pcall(function()
+                if config.ReboundESP or config.PassESP then ensureGui() end
+                local ball = GetCurrentBall()
+                autoSteal(now, character, root, humanoid)
+                rebound(now, character, root, humanoid, ball)
+                passTarget(character, root, ball)
+            end)
+            if not ok and not warned then
+                warned = true
+                NexusUI:Notify({Title = "Smart Support", Content = "Feature error: " .. tostring(err), Duration = 5})
+            end
+        end)
+    end
+    Tabs.Main:AddSection("Smart Support", "Right")
+    for _, control in ipairs({
+        {"AutoSteal", "Smart Auto Steal", "Uses the ordinary Steal action only in range, facing the carrier and outside ball protection"},
+        {"AutoRebound", "Auto Rebound Jump", "Times a normal jump against a descending free ball; does not move or teleport you"},
+        {"ReboundESP", "Rebound Point ESP", "Shows an estimated free-ball crossing at catch height; collisions can change it"},
+        {"PassESP", "Open Pass Target ESP", "Highlights a teammate with a clear lane and distance from defenders"},
+    }) do
+        local key = control[1]
+        Tabs.Main:AddToggle("PRIME_SS_" .. key, {Title = control[2], Description = control[3], Default = false,
+            Callback = function(value)
+                config[key] = value == true and not ScriptUnloaded
+                if anyEnabled() then start() else stop() end
+            end})
+    end
+    for _, control in ipairs({{"StealRange", "Auto Steal Range", 3, 15}, {"ReboundRange", "Rebound Reach", 2, 10}}) do
+        local key = control[1]
+        Tabs.Main:AddSlider("PRIME_SS_" .. key, {Title = control[2], Default = config[key], Min = control[3], Max = control[4], Step = 1, Rounding = 0,
+            Callback = function(value) if finite(value) then config[key] = math.max(control[3], math.min(control[4], value)) end end})
+    end
+    Tabs.Main:SetActiveSection(MainSection)
+    RegisterUnloadCallback(function()
+        for _, key in ipairs({"AutoSteal", "AutoRebound", "ReboundESP", "PassESP"}) do config[key] = false end
+        stop()
+    end)
+end
+-- END PRIME SMART SUPPORT v1
+
+
 -- Cosmetic selector (Additional)
 CosmeticAssets = ReplicatedStorage:WaitForChild("Assets"):WaitForChild("Cosmetics")
 ActiveCosmeticContainer = nil
