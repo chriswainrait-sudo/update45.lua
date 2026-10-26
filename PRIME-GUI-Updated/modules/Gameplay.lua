@@ -1122,7 +1122,6 @@ end
     local config = {StealDanger = false, InfiniteDribble = false, AutoDribble = false,
         SilentAimShot = false, AutoDunk = false, PerfectShot = false}
     local controllers, connections, roundConnections = {}, {}, {}
-    local cachedKnit, cachedKnitModule
     local alive = false
     local heartbeat, discoveryTask, dangerGui, dangerLabel
     local infinitePatch, throwPatch
@@ -1543,12 +1542,16 @@ end
         if not signal or type(signal.Connect) ~= "function" then return end
         if perfectEchoSignal == signal and echoConnected() then return end
         if perfectEcho then pcall(function() perfectEcho:Disconnect() end) end
+        -- The callback only hands off: all work runs in a fresh deferred thread,
+        -- after the game's own handler for the same event has finished.
         local ok, connection = pcall(signal.Connect, signal, function(destination)
-            if alive and config.PerfectShot and typeof(destination) == "Vector3"
-                and os.clock() - lastShotAt < 1.5 then
+            if typeof(destination) ~= "Vector3" then return end
+            task.defer(function()
+                if not (alive and config.PerfectShot) or lastHolder() ~= LocalPlayer
+                    or os.clock() - lastShotAt >= 1.5 then return end
                 lastShotAt = -math.huge
-                armPerfect()
-            end
+                pcall(armPerfect)
+            end)
         end)
         if ok and connection then perfectEcho, perfectEchoSignal = connection, signal end
     end
@@ -1556,18 +1559,16 @@ end
         if discoveryTask or not alive then return end
         discoveryTask = task.defer(function()
             local found = {}
-            local packages = ReplicatedStorage:FindFirstChild("Packages")
-            local knitModule = packages and packages:FindFirstChild("Knit")
-            if knitModule and (not cachedKnit or cachedKnitModule ~= knitModule) then
-                local ok, knit = pcall(require, knitModule)
-                if ok and type(knit) == "table" and type(knit.GetController) == "function" then
-                    cachedKnit, cachedKnitModule = knit, knitModule
-                end
-            end
-            if cachedKnit then
+            -- Same pattern the game itself uses: require its already-loaded controller
+            -- modules. No Knit registry call, and only once the round has started.
+            local folder = ReplicatedStorage:FindFirstChild("Controllers")
+            if folder and LocalPlayer.Character and ReplicatedStorage:FindFirstChild("GameValues") then
                 for _, name in ipairs({"BallController", "MovementController", "Network", "AbilityController"}) do
-                    local ok, object = pcall(cachedKnit.GetController, name)
-                    if ok and type(object) == "table" then found[name] = object end
+                    local module = folder:FindFirstChild(name)
+                    if module and module:IsA("ModuleScript") then
+                        local ok, object = pcall(require, module)
+                        if ok and type(object) == "table" then found[name] = object end
+                    end
                 end
             end
             if (not found.BallController or not found.MovementController or not found.Network or not found.AbilityController)
@@ -1746,12 +1747,12 @@ end
         {"InfiniteDribble", "Infinite Dribble", "Unlimited local Dribble uses with no series limit or cooldown"},
         {"AutoDribble", "Auto Dribble", "Reacts only to an opposing player's Steal animation directed at you"},
         {"SilentAimShot", "Silent Aim", "Aims ordinary shot releases at your scoring hoop without moving the camera"},
-        {"PerfectShot", "Perfect Shot", "Hold the ball for about 5 seconds before shooting for this feature to work."},
+        {"PerfectShot", "Perfect Shot", ""},
         {"AutoDunk", "Auto Dunk", "Activates the game Dunk button in range; no keyboard input or module calls"},
     }
     for _, control in ipairs(controls) do
         local key, title, description = control[1], control[2], control[3]
-        Tabs.Main:AddToggle(key, {Title = title, Description = description, ShowDescription = key == "PerfectShot", Default = false,
+        Tabs.Main:AddToggle(key, {Title = title, Description = description, ShowDescription = false, Default = false,
             Callback = function(value) setFeature(key, value) end})
     end
 -- No Steal Fall: scoped to the local character's ordinary Steal animation.
