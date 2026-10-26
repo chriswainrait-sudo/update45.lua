@@ -1388,15 +1388,24 @@ end
         return ApplyShotPowerModifier(aim, nil, targetSpeed), seconds
     end
     -- END PERFECT SHOT BALLISTICS
+    local function lastHolder()
+        local controller = controllers.BallController
+        if controller and type(controller.GetLastPlayerToPossessBall) == "function" then
+            local ok, player = pcall(controller.GetLastPlayerToPossessBall, controller)
+            if ok then return player end
+        end
+    end
+    -- Armed by the server's own Throw echo (the game reacts to the same event),
+    -- so it needs no patch on Fire and no ball possession at that instant.
     local function armPerfect()
         clearPerfect()
         local ball = GetCurrentBall()
         local hoop = targetHoop()
-        if not ball or not hoop or not playing() or not hasBall() then return end
+        if not ball or not hoop or not playing() or lastHolder() ~= LocalPlayer then return end
         local now = os.clock()
         local _, root = localParts()
         perfectFlight = {ball = ball, hoop = hoop, character = LocalPlayer.Character,
-            started = now, deadline = now + 2, confirmed = false,
+            started = now, deadline = now + 2, confirmed = true,
             characterDistance = root and (hoop.Position - root.Position).Magnitude or nil}
         perfectShotLock = {ball = ball, expires = perfectFlight.deadline}
         -- Only this pending/released shot owns a physics callback. No idle
@@ -1475,8 +1484,6 @@ end
     local function removeSilentAim()
         local patch = throwPatch
         throwPatch = nil
-        clearPerfect()
-        if patch and patch.received then patch.received:Disconnect() end
         if patch and rawget(patch.object, "Fire") == patch.wrapper then
             rawset(patch.object, "Fire", patch.rawOriginal)
         end
@@ -1487,26 +1494,17 @@ end
         local signal = service and service.Throw
         if not (config.SilentAimShot or config.PerfectShot) or not mutable(signal) then removeSilentAim() return end
         if throwPatch and throwPatch.object == signal
-            and rawget(signal, "Fire") == throwPatch.wrapper
-            and (not throwPatch.received or throwPatch.received.Connected ~= false) then return end
+            and rawget(signal, "Fire") == throwPatch.wrapper then return end
         removeSilentAim()
         local original = signal.Fire
         if type(original) ~= "function" then return end
         local patch = {object = signal, rawOriginal = rawget(signal, "Fire")}
-        if type(signal.Connect) == "function" then
-            patch.received = signal:Connect(function(destination)
-                if throwPatch == patch and perfectFlight and typeof(destination) == "Vector3" then
-                    perfectFlight.confirmed = true
-                end
-            end)
-        end
         patch.wrapper = function(self, ...)
             local args = table.pack(...)
             local state = states()
             if alive and (config.SilentAimShot or config.PerfectShot) and self == signal and typeof(args[1]) == "Vector2"
                 and args[2] ~= true and not state.Dunking and not state.Ability
                 and (state.Shooting or state.AimAssist) then
-                if config.PerfectShot then armPerfect() end
                 local _, root = localParts()
                 local hoop = targetHoop()
                 if root and hoop then
@@ -1521,6 +1519,38 @@ end
         end
         rawset(signal, "Fire", patch.wrapper)
         throwPatch = patch
+    end
+    local perfectEcho, perfectEchoSignal
+    local lastShotAt = -math.huge
+    local function echoConnected()
+        if not perfectEcho then return false end
+        local ok, value = pcall(function() return perfectEcho.Connected end)
+        return ok and value ~= false
+    end
+    local function removePerfectHook()
+        if perfectEcho then pcall(function() perfectEcho:Disconnect() end) end
+        perfectEcho, perfectEchoSignal = nil, nil
+        clearPerfect()
+    end
+    local function updatePerfectHook()
+        if not config.PerfectShot then
+            if perfectEcho then removePerfectHook() end
+            return
+        end
+        local ability = controllers.AbilityController
+        local service = ability and ability.BallService
+        local signal = service and service.Throw
+        if not signal or type(signal.Connect) ~= "function" then return end
+        if perfectEchoSignal == signal and echoConnected() then return end
+        if perfectEcho then pcall(function() perfectEcho:Disconnect() end) end
+        local ok, connection = pcall(signal.Connect, signal, function(destination)
+            if alive and config.PerfectShot and typeof(destination) == "Vector3"
+                and os.clock() - lastShotAt < 1.5 then
+                lastShotAt = -math.huge
+                armPerfect()
+            end
+        end)
+        if ok and connection then perfectEcho, perfectEchoSignal = connection, signal end
     end
     local function discoverControllers()
         if discoveryTask or not alive then return end
@@ -1601,6 +1631,7 @@ end
         -- Keep the toggles enabled, but rebuild their runtime bindings.
         if discoveryTask then pcall(task.cancel, discoveryTask) discoveryTask = nil end
         removeSilentAim()
+        removePerfectHook()
         table.clear(controllers)
         actionEpoch = actionEpoch + 1
         actionBusy = false
@@ -1643,6 +1674,7 @@ end
         disconnectAll(roundConnections)
         removeInfinite()
         removeSilentAim()
+        removePerfectHook()
         removeDangerGui()
         table.clear(controllers)
         table.clear(notified)
@@ -1670,6 +1702,11 @@ end
             end
             updateSilentAim()
             updateInfinite()
+            updatePerfectHook()
+            if config.PerfectShot then
+                local state = states()
+                if (state.Shooting or state.AimAssist) and not state.Dunking and not state.Ability then lastShotAt = now end
+            end
             if now - lastThreatCheck < 0.04 then return end
             lastThreatCheck = now
             local character, root, humanoid = localParts()
